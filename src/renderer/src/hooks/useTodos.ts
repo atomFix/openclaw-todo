@@ -4,6 +4,51 @@ import { api, initClient } from '../api/client'
 import type { Todo, TodoStats, TodoQuery, CreateTodoInput, UpdateTodoInput, Subtask, WeeklyStat, Group, CreateGroupInput, UpdateGroupInput, TodoSummaryItem, SmartView, SmartCounts } from '../types/todo'
 import dayjs from 'dayjs'
 
+// ─── Data comparison (excludes volatile timestamps) ───
+function todosEqual(
+  a: Todo[], b: Todo[],
+  totalA: number, totalB: number,
+): boolean {
+  if (totalA !== totalB || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id ||
+        a[i].title !== b[i].title ||
+        a[i].description !== b[i].description ||
+        a[i].status !== b[i].status ||
+        a[i].priority !== b[i].priority ||
+        a[i].tags !== b[i].tags ||
+        a[i].subtasks !== b[i].subtasks ||
+        a[i].due_date !== b[i].due_date ||
+        a[i].notes !== b[i].notes ||
+        a[i].group_id !== b[i].group_id ||
+        a[i].source !== b[i].source ||
+        a[i].summary !== b[i].summary ||
+        a[i].archived !== b[i].archived ||
+        a[i].deadline_label !== b[i].deadline_label ||
+        a[i].remind_count !== b[i].remind_count) return false
+  }
+  return true
+}
+
+// ─── Client-side smart view derivation ───
+function deriveForSmartView(view: SmartView, cache: Todo[]): Todo[] {
+  const today = dayjs().format('YYYY-MM-DD')
+  const weekLater = dayjs().add(7, 'day').format('YYYY-MM-DD')
+  switch (view) {
+    case 'today':
+      return cache.filter(t => t.due_date === today)
+    case 'upcoming':
+      return cache.filter(t => t.due_date && t.due_date >= today && t.due_date <= weekLater)
+    case 'overdue':
+      return cache.filter(t => t.due_date && t.due_date < today && t.status !== 'done')
+    default:
+      return cache
+  }
+}
+
+type FetchMode = 'loading' | 'silent'
+const SKELETON_MIN_MS = 500
+
 interface UseTodosReturn {
   todos: Todo[]
   total: number
@@ -56,10 +101,77 @@ export function useTodos(): UseTodosReturn {
   const [activeSmartView, setActiveSmartView] = useState<SmartView>('all')
   const [allTags, setAllTags] = useState<string[]>([])
 
+  // ─── Refs ───
+  const todosSnapshotRef = useRef<{ todos: Todo[]; total: number }>({ todos: [], total: 0 })
+  const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const masterCacheRef = useRef<Todo[]>([])
+  const activeSmartViewRef = useRef<SmartView>('all')
+  const cacheLoadingRef = useRef(false)
+  const currentDateRef = useRef(dayjs().format('YYYY-MM-DD'))
+
+  useEffect(() => { todosSnapshotRef.current = { todos, total } }, [todos, total])
+  useEffect(() => { activeSmartViewRef.current = activeSmartView }, [activeSmartView])
+  useEffect(() => {
+    return () => {
+      if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current)
+    }
+  }, [])
+
   useEffect(() => {
     initClient().then(() => setInitialized(true))
   }, [])
 
+  // ─── Master cache: all non-archived todos for instant smart-view switching ───
+  const refreshMasterCache = useCallback(async () => {
+    if (!initialized || cacheLoadingRef.current) return
+    cacheLoadingRef.current = true
+    try {
+      const result = await api.listTodos({ page: 1, page_size: 9999, archived: '0' })
+      masterCacheRef.current = result.data
+      // Re-derive current smart view if needed
+      if (activeSmartViewRef.current !== 'all') {
+        const derived = deriveForSmartView(activeSmartViewRef.current, result.data)
+        const snap = todosSnapshotRef.current
+        if (!todosEqual(snap.todos, derived, snap.total, derived.length)) {
+          setTodos(derived)
+          setTotal(derived.length)
+        }
+        setLoading(false)
+      }
+    } catch (err) {
+      console.error('Failed to refresh master cache:', err)
+    } finally {
+      cacheLoadingRef.current = false
+    }
+  }, [initialized])
+
+  // Load cache on init
+  useEffect(() => {
+    if (initialized) refreshMasterCache()
+  }, [initialized, refreshMasterCache])
+
+  // Periodic cache refresh (every 5 min) + midnight detection (every min)
+  useEffect(() => {
+    const dateTimer = setInterval(() => {
+      const today = dayjs().format('YYYY-MM-DD')
+      if (today !== currentDateRef.current) {
+        currentDateRef.current = today
+        // Date changed — re-derive smart view from cache
+        if (activeSmartViewRef.current !== 'all' && masterCacheRef.current.length > 0) {
+          const derived = deriveForSmartView(activeSmartViewRef.current, masterCacheRef.current)
+          setTodos(derived)
+          setTotal(derived.length)
+        }
+        fetchSmartCounts()
+      }
+    }, 60_000)
+    const cacheTimer = setInterval(() => {
+      refreshMasterCache()
+    }, 5 * 60_000)
+    return () => { clearInterval(dateTimer); clearInterval(cacheTimer) }
+  }, [refreshMasterCache, fetchSmartCounts])
+
+  // ─── Groups ───
   const fetchGroups = useCallback(async () => {
     if (!initialized) return
     try {
@@ -74,7 +186,7 @@ export function useTodos(): UseTodosReturn {
     }
   }, [initialized])
 
-  // When selectedGroupId changes, update query.group_id and default to non-archived
+  // selectedGroupId → query sync (only matters for 'all' view server fetch)
   useEffect(() => {
     if (selectedGroupId) {
       setQueryState(prev => ({ ...prev, group_id: selectedGroupId, archived: '0', page: 1 }))
@@ -86,33 +198,67 @@ export function useTodos(): UseTodosReturn {
     }
   }, [selectedGroupId])
 
-  const fetchTodos = useCallback(async () => {
+  // ─── Fetch todos (server-side, for 'all' view) ───
+  const fetchTodos = useCallback(async (mode: FetchMode = 'loading') => {
     if (!initialized) return
-    setLoading(true)
+    // Skip when on a smart view — data comes from cache
+    if (activeSmartViewRef.current !== 'all') return
+
+    const loadingStart = Date.now()
+    if (mode === 'loading') {
+      if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current)
+      setLoading(true)
+    }
+
     try {
       const [listResult, statsResult] = await Promise.all([
         api.listTodos(query),
         api.getStats(),
       ])
-      setTodos(listResult.data)
-      setTotal(listResult.total)
-      setStats(statsResult)
+
+      if (mode === 'silent' && todosSnapshotRef.current.todos.length > 0) {
+        const snap = todosSnapshotRef.current
+        if (todosEqual(snap.todos, listResult.data, snap.total, listResult.total)) {
+          return
+        }
+      }
+
+      const applyUpdate = () => {
+        setTodos(listResult.data)
+        setTotal(listResult.total)
+        setStats(statsResult)
+        if (mode === 'loading') setLoading(false)
+      }
+
+      if (mode === 'loading') {
+        const elapsed = Date.now() - loadingStart
+        const remaining = Math.max(0, SKELETON_MIN_MS - elapsed)
+        if (remaining > 0) {
+          loadingTimerRef.current = setTimeout(applyUpdate, remaining)
+        } else {
+          applyUpdate()
+        }
+      } else {
+        applyUpdate()
+      }
     } catch (err) {
       console.error('Failed to fetch todos:', err)
-    } finally {
-      setLoading(false)
+      if (mode === 'loading') {
+        const elapsed = Date.now() - loadingStart
+        const remaining = Math.max(0, SKELETON_MIN_MS - elapsed)
+        if (remaining > 0) {
+          setTimeout(() => setLoading(false), remaining)
+        } else {
+          setLoading(false)
+        }
+      }
     }
   }, [query, initialized])
 
-  useEffect(() => {
-    fetchTodos()
-  }, [fetchTodos])
+  useEffect(() => { fetchTodos() }, [fetchTodos])
+  useEffect(() => { fetchGroups() }, [fetchGroups])
 
-  useEffect(() => {
-    fetchGroups()
-  }, [fetchGroups])
-
-  // Refresh groups after any todo mutation
+  // ─── Sidebar data ───
   const fetchSummaryTodos = useCallback(async () => {
     if (!initialized) return
     try {
@@ -133,13 +279,8 @@ export function useTodos(): UseTodosReturn {
     }
   }, [initialized])
 
-  useEffect(() => {
-    fetchSummaryTodos()
-  }, [fetchSummaryTodos])
-
-  useEffect(() => {
-    fetchSmartCounts()
-  }, [fetchSmartCounts])
+  useEffect(() => { fetchSummaryTodos() }, [fetchSummaryTodos])
+  useEffect(() => { fetchSmartCounts() }, [fetchSmartCounts])
 
   // Extract tags from todos
   useEffect(() => {
@@ -153,19 +294,18 @@ export function useTodos(): UseTodosReturn {
     setAllTags(Array.from(tagSet).sort())
   }, [todos])
 
+  // ─── Background refresh after mutations ───
   const refreshAfterMutation = useCallback(() => {
-    fetchTodos()
+    fetchTodos('silent')
     fetchGroups()
     fetchSummaryTodos()
     fetchSmartCounts()
-  }, [fetchTodos, fetchGroups, fetchSummaryTodos, fetchSmartCounts])
+    refreshMasterCache()
+  }, [fetchTodos, fetchGroups, fetchSummaryTodos, fetchSmartCounts, refreshMasterCache])
 
-  // Debounced version to prevent request flooding on rapid mutations
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    return () => {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current)
-    }
+    return () => { if (debounceTimer.current) clearTimeout(debounceTimer.current) }
   }, [])
 
   const debouncedRefresh = useCallback(() => {
@@ -179,25 +319,33 @@ export function useTodos(): UseTodosReturn {
     setQueryState((prev) => ({ ...prev, ...newQuery, page: newQuery.page ?? 1 }))
   }, [])
 
+  // ─── Smart view switch: instant from cache ───
   const handleSmartViewChange = useCallback((view: SmartView) => {
     setActiveSmartView(view)
-    const today = dayjs().format('YYYY-MM-DD')
-    const weekLater = dayjs().add(7, 'day').format('YYYY-MM-DD')
+    activeSmartViewRef.current = view // sync ref immediately
 
-    if (view === 'all') {
+    if (view !== 'all') {
+      // Smart view: derive from cache instantly
+      if (masterCacheRef.current.length > 0) {
+        const derived = deriveForSmartView(view, masterCacheRef.current)
+        setTodos(derived)
+        setTotal(derived.length)
+        setLoading(false)
+      } else {
+        // Cache not ready yet — show skeleton until cache loads
+        setLoading(true)
+      }
+      // Don't change queryState → fetchTodos won't fire
+    } else {
+      // 'all' view: server fetch with clean query
       setQueryState(prev => {
         const { due_before, due_after, ...rest } = prev
         return { ...rest, page: 1 }
       })
-    } else if (view === 'today') {
-      setQueryState(prev => ({ ...prev, due_after: today, due_before: today, page: 1 }))
-    } else if (view === 'upcoming') {
-      setQueryState(prev => ({ ...prev, due_after: today, due_before: weekLater, page: 1 }))
-    } else if (view === 'overdue') {
-      setQueryState(prev => ({ ...prev, due_before: today, page: 1, due_after: undefined }))
     }
   }, [])
 
+  // ─── CRUD operations (all optimistic) ───
   let tempIdCounter = 0
   const nextTempId = () => `__temp_${++tempIdCounter}_${Date.now()}`
 
@@ -225,18 +373,15 @@ export function useTodos(): UseTodosReturn {
       summary: input.summary ?? '',
     }
 
-    // Optimistic: prepend immediately
     setTodos(prev => [tempTodo, ...prev])
     setTotal(prev => prev + 1)
 
     try {
       const realTodo = await api.createTodo(input)
-      // Replace temp todo with real one (preserves position)
       setTodos(prev => prev.map(t => t.id === tempId ? realTodo : t))
       debouncedRefresh()
       return realTodo
     } catch (err) {
-      // Rollback
       setTodos(prev => prev.filter(t => t.id !== tempId))
       setTotal(prev => Math.max(0, prev - 1))
       throw err
@@ -244,7 +389,6 @@ export function useTodos(): UseTodosReturn {
   }, [debouncedRefresh])
 
   const updateTodo = useCallback(async (id: string, input: UpdateTodoInput): Promise<Todo> => {
-    // Optimistic: apply changes locally
     setTodos(prev => prev.map(t => {
       if (t.id !== id) return t
       const updated = { ...t, updated_at: new Date().toISOString() }
@@ -266,12 +410,10 @@ export function useTodos(): UseTodosReturn {
 
     try {
       const realTodo = await api.updateTodo(id, input)
-      // Reconcile: replace with server version
       setTodos(prev => prev.map(t => t.id === id ? realTodo : t))
       debouncedRefresh()
       return realTodo
     } catch (err) {
-      // Rollback by re-fetching
       fetchTodos()
       throw err
     }
@@ -283,25 +425,16 @@ export function useTodos(): UseTodosReturn {
     return todo
   }, [debouncedRefresh])
 
-  // Optimistic status update: immediately update UI, then sync with server
   const optimisticUpdateTodoStatus = useCallback((id: string, status: Todo['status']) => {
     setTodos(prev => prev.map(t => {
       if (t.id !== id) return t
-      return {
-        ...t,
-        status,
-        completed_at: status === 'done' ? new Date().toISOString() : null,
-      }
+      return { ...t, status, completed_at: status === 'done' ? new Date().toISOString() : null }
     }))
 
-    // Send API request in background
     api.updateTodoStatus(id, status)
-      .then(() => {
-        debouncedRefresh()
-      })
+      .then(() => { debouncedRefresh() })
       .catch(() => {
         message.error('状态更新失败')
-        // Rollback by re-fetching
         fetchTodos()
       })
   }, [debouncedRefresh, fetchTodos])
@@ -321,7 +454,6 @@ export function useTodos(): UseTodosReturn {
   }, [debouncedRefresh, fetchTodos])
 
   const toggleSubtask = useCallback(async (id: string, index: number): Promise<Todo> => {
-    // Optimistic: flip the subtask locally
     setTodos(prev => prev.map(t => {
       if (t.id !== id) return t
       try {
@@ -377,13 +509,8 @@ export function useTodos(): UseTodosReturn {
     }
   }, [todos, debouncedRefresh])
 
-  const getSources = useCallback(async (): Promise<string[]> => {
-    return api.getSources()
-  }, [])
-
-  const getWeeklyStats = useCallback(async (): Promise<WeeklyStat[]> => {
-    return api.getWeeklyStats()
-  }, [])
+  const getSources = useCallback(async (): Promise<string[]> => { return api.getSources() }, [])
+  const getWeeklyStats = useCallback(async (): Promise<WeeklyStat[]> => { return api.getWeeklyStats() }, [])
 
   const createGroup = useCallback(async (input: CreateGroupInput): Promise<Group> => {
     const group = await api.createGroup(input)
@@ -399,9 +526,7 @@ export function useTodos(): UseTodosReturn {
 
   const deleteGroup = useCallback(async (id: string): Promise<void> => {
     await api.deleteGroup(id)
-    if (selectedGroupId === id) {
-      setSelectedGroupId(null)
-    }
+    if (selectedGroupId === id) setSelectedGroupId(null)
     fetchGroups()
   }, [fetchGroups, selectedGroupId])
 
@@ -411,7 +536,6 @@ export function useTodos(): UseTodosReturn {
   }, [fetchGroups])
 
   const promoteSubtask = useCallback(async (todoId: string, index: number): Promise<Todo> => {
-    // Optimistic: remove the subtask locally, create a temp new todo
     let removedSubtask: Subtask | null = null
     setTodos(prev => prev.map(t => {
       if (t.id !== todoId) return t
@@ -427,12 +551,10 @@ export function useTodos(): UseTodosReturn {
       return t
     }))
 
-    // If a subtask was promoted, optimistically add it as a new todo
     const promotedTempId = nextTempId()
     if (removedSubtask) {
       const now = new Date().toISOString()
       setTodos(prev => {
-        // Find the parent todo to get group_id
         const parent = prev.find(t => t.id === todoId)
         const promoted: Todo = {
           id: promotedTempId,
