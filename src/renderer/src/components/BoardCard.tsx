@@ -3,6 +3,7 @@ import { Tooltip } from 'antd'
 import { ExclamationCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Todo, Subtask } from '../types/todo'
+import { formatRelativeDate } from '../utils/relativeDate'
 
 interface Props {
   todo: Todo
@@ -78,7 +79,7 @@ const BoardCard: React.FC<Props> = ({ todo, onClick, onStatusChange }) => {
             display: 'flex', alignItems: 'center', gap: 4,
           }}>
             {isOverdue && <ExclamationCircleOutlined style={{ fontSize: 10 }} />}
-            {dayjs(todo.due_date).format('MM/DD')}
+            {formatRelativeDate(todo.due_date)}
           </div>
         )}
       </div>

@@ -40,6 +40,10 @@ interface Props {
   smartCounts: SmartCounts
   activeSmartView: SmartView
   onSmartViewChange: (view: SmartView) => void
+  allTags: string[]
+  onFilterTag: (tag: string | null) => void
+  activeTag: string | null
+  tagCounts: Record<string, number>
 }
 
 const Sidebar: React.FC<Props> = ({
@@ -49,6 +53,7 @@ const Sidebar: React.FC<Props> = ({
   summaryTodos, onViewSummary,
   isDark, onToggleTheme,
   smartCounts, activeSmartView, onSmartViewChange,
+  allTags, onFilterTag, activeTag, tagCounts,
 }) => {
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
@@ -279,7 +284,7 @@ const Sidebar: React.FC<Props> = ({
         >
           <TagOutlined style={{ fontSize: 14, color: selectedGroupId === null && activeSmartView === 'all' ? 'var(--brand-primary)' : 'var(--text-tertiary)' }} />
           <span className="sidebar-item-text">全部任务</span>
-          <span className="sidebar-item-badge">{allCount}</span>
+          <span key={allCount} className="sidebar-item-badge count-badge-pulse">{allCount}</span>
         </div>
 
         {/* Smart views */}
@@ -295,7 +300,7 @@ const Sidebar: React.FC<Props> = ({
         >
           <CalendarOutlined style={{ fontSize: 14, color: activeSmartView === 'today' ? 'var(--brand-primary)' : 'var(--text-tertiary)' }} />
           <span className="sidebar-item-text">今天</span>
-          {smartCounts.today > 0 && <span className="sidebar-item-badge">{smartCounts.today}</span>}
+          {smartCounts.today > 0 && <span key={smartCounts.today} className="sidebar-item-badge count-badge-pulse">{smartCounts.today}</span>}
         </div>
         <div
           className={`sidebar-item ${activeSmartView === 'upcoming' ? 'active' : ''}`}
@@ -304,7 +309,7 @@ const Sidebar: React.FC<Props> = ({
         >
           <ClockCircleOutlined style={{ fontSize: 14, color: activeSmartView === 'upcoming' ? 'var(--brand-primary)' : 'var(--text-tertiary)' }} />
           <span className="sidebar-item-text">即将到期</span>
-          {smartCounts.upcoming > 0 && <span className="sidebar-item-badge">{smartCounts.upcoming}</span>}
+          {smartCounts.upcoming > 0 && <span key={smartCounts.upcoming} className="sidebar-item-badge count-badge-pulse">{smartCounts.upcoming}</span>}
         </div>
         <div
           className={`sidebar-item ${activeSmartView === 'overdue' ? 'active' : ''}`}
@@ -314,7 +319,7 @@ const Sidebar: React.FC<Props> = ({
           <ExclamationCircleOutlined style={{ fontSize: 14, color: activeSmartView === 'overdue' ? 'var(--semantic-danger)' : 'var(--text-tertiary)' }} />
           <span className="sidebar-item-text">已过期</span>
           {smartCounts.overdue > 0 && (
-            <span className="sidebar-item-badge" style={{ background: 'var(--semantic-danger-bg)', color: 'var(--semantic-danger)' }}>{smartCounts.overdue}</span>
+            <span key={smartCounts.overdue} className="sidebar-item-badge count-badge-pulse" style={{ background: 'var(--semantic-danger-bg)', color: 'var(--semantic-danger)' }}>{smartCounts.overdue}</span>
           )}
         </div>
 
@@ -365,7 +370,7 @@ const Sidebar: React.FC<Props> = ({
                 />
                 <FolderOutlined style={{ fontSize: 14, color: selectedGroupId === group.id ? 'var(--brand-primary)' : 'var(--text-tertiary)' }} />
                 <span className="sidebar-item-text">{group.name}</span>
-                <span className="sidebar-item-badge">{group.todo_count ?? 0}</span>
+                <span key={group.todo_count} className="sidebar-item-badge count-badge-pulse">{group.todo_count ?? 0}</span>
                 <Dropdown
                   menu={{
                     items: [
@@ -425,6 +430,38 @@ const Sidebar: React.FC<Props> = ({
               style={{ flex: 1, fontSize: 13, height: 28 }}
             />
           </div>
+        )}
+
+        {/* Tags section */}
+        {allTags.length > 0 && (
+          <>
+            <div className="sidebar-separator" />
+            <div style={{ padding: '4px 12px' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-quinary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                标签
+              </div>
+            </div>
+            {allTags.slice(0, 10).map(tag => (
+              <div
+                key={tag}
+                className={`sidebar-item${activeTag === tag ? ' active' : ''}`}
+                onClick={() => onFilterTag(activeTag === tag ? null : tag)}
+                style={{ padding: '6px 12px' }}
+              >
+                <span className="sidebar-item-text" style={{ fontSize: 12 }}>
+                  {tag}
+                </span>
+                <span className="sidebar-item-badge">
+                  {tagCounts[tag] || 0}
+                </span>
+              </div>
+            ))}
+            {allTags.length > 10 && (
+              <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-quinary)' }}>
+                +{allTags.length - 10} 更多
+              </div>
+            )}
+          </>
         )}
 
         {/* Summary docs section */}

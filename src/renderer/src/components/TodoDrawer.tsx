@@ -1,14 +1,22 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { Drawer, DatePicker, Select, Tooltip, Popconfirm, message } from 'antd'
+import React, { useState, useEffect, useCallback } from 'react'
+import { Drawer, DatePicker, Select, Tooltip, Popconfirm } from 'antd'
 import {
   ClockCircleOutlined,
   DeleteOutlined,
   PlusOutlined,
   ArrowUpOutlined,
   FileTextOutlined,
+  CloseOutlined,
+  CalendarOutlined,
+  TagOutlined,
+  FolderOutlined,
+  ExclamationCircleOutlined,
 } from '@ant-design/icons'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { Todo, Subtask, UpdateTodoInput, Group } from '../types/todo'
 import dayjs from 'dayjs'
+import { formatRelativeDate } from '../utils/relativeDate'
 
 const priorityOptions: { value: Todo['priority']; label: string; color: string; bg: string }[] = [
   { value: 'high', label: '高', color: 'var(--semantic-danger)', bg: 'var(--semantic-danger-bg)' },
@@ -22,12 +30,11 @@ const statusOptions: { value: Todo['status']; label: string; color: string; bg: 
   { value: 'done', label: '已完成', color: 'var(--semantic-success)', bg: 'var(--semantic-success-bg)', dot: 'var(--semantic-success)' },
 ]
 
-const SectionLabel: React.FC<{ children: React.ReactNode; optional?: boolean }> = ({ children, optional }) => (
-  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-quaternary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-    {children}
-    {optional && <span style={{ fontWeight: 400, marginLeft: 4 }}>(可选)</span>}
-  </div>
-)
+const priorityColorMap: Record<string, string> = {
+  high: 'var(--semantic-danger)',
+  medium: 'var(--semantic-warning)',
+  low: 'var(--semantic-success)',
+}
 
 interface Props {
   open: boolean
@@ -43,11 +50,27 @@ interface Props {
   groups: Group[]
 }
 
+const SectionLabel: React.FC<{ children: React.ReactNode; optional?: boolean }> = ({ children, optional }) => (
+  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-quaternary)', textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: 8 }}>
+    {children}
+    {optional && <span style={{ fontWeight: 400, opacity: 0.6, marginLeft: 4 }}>(可选)</span>}
+  </div>
+)
+
+const MetaChip: React.FC<{ icon: React.ReactNode; children: React.ReactNode; color?: string }> = ({ icon, children, color }) => (
+  <div style={{
+    display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11,
+    color: color || 'var(--text-quinary)', lineHeight: '16px',
+  }}>
+    {icon}
+    {children}
+  </div>
+)
+
 const TodoDrawer: React.FC<Props> = ({
   open, todo, onClose, onUpdate, onDelete, onStatusChange,
   onToggleSubtask, onPromoteSubtask, onViewSummary, sources, groups,
 }) => {
-  // Local state initialized from todo prop
   const [title, setTitle] = useState('')
   const [status, setStatus] = useState<Todo['status']>('pending')
   const [priority, setPriority] = useState<Todo['priority']>('medium')
@@ -59,7 +82,6 @@ const TodoDrawer: React.FC<Props> = ({
   const [groupId, setGroupId] = useState<string | undefined>(undefined)
   const [newSubtask, setNewSubtask] = useState('')
 
-  // Sync from todo prop
   useEffect(() => {
     if (todo) {
       setTitle(todo.title)
@@ -73,14 +95,12 @@ const TodoDrawer: React.FC<Props> = ({
       setGroupId(todo.group_id || undefined)
       setNewSubtask('')
     }
-  }, [todo?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [todo?.id])
 
   const handleBlur = useCallback(async (field: string, value: any) => {
     if (!todo) return
-    // Check if value actually changed
     let changed = false
     let updateData: UpdateTodoInput = {}
-
     switch (field) {
       case 'title':
         if (value !== todo.title && value.trim()) { updateData.title = value.trim(); changed = true }
@@ -106,12 +126,10 @@ const TodoDrawer: React.FC<Props> = ({
         if (value !== todo.priority) { updateData.priority = value; changed = true }
         break
     }
-
     if (changed) {
       try {
         await onUpdate(todo.id, updateData)
       } catch {
-        // Revert on failure
         if (field === 'title') setTitle(todo.title)
         if (field === 'description') setDescription(todo.description || '')
         if (field === 'notes') setNotes(todo.notes || '')
@@ -122,80 +140,74 @@ const TodoDrawer: React.FC<Props> = ({
   const handleAddSubtask = () => {
     const text = newSubtask.trim()
     if (!text) return
-    const newSubtasks = [...subtasks, { text, done: false }]
-    setSubtasks(newSubtasks)
+    const next = [...subtasks, { text, done: false }]
+    setSubtasks(next)
     setNewSubtask('')
-    if (todo) {
-      onUpdate(todo.id, { subtasks: newSubtasks }).catch(() => {
-        setSubtasks(subtasks)
-      })
-    }
+    if (todo) onUpdate(todo.id, { subtasks: next }).catch(() => setSubtasks(subtasks))
   }
 
   if (!todo) return null
+
+  const isDone = todo.status === 'done'
+  const isOverdue = todo.due_date && dayjs(todo.due_date).isBefore(dayjs(), 'day') && !isDone
+  const subtaskDone = subtasks.filter(s => s.done).length
 
   return (
     <Drawer
       open={open}
       onClose={onClose}
       placement="right"
-      width={500}
+      width={520}
       title={null}
-      closable
+      closable={false}
       styles={{
-        body: { padding: '24px 24px 24px', overflow: 'auto' },
+        body: { padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' },
         header: { display: 'none' },
+        wrapper: { boxShadow: '-8px 0 40px rgba(0,0,0,0.12)' },
       }}
       className="todo-drawer"
     >
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-quinary)', fontFamily: 'monospace' }}>
-            TODO-{todo.id.slice(0, 6)}
-          </span>
+      {/* Sticky header */}
+      <div className="drawer-header">
+        <div className="drawer-header-left">
+          <div className="drawer-priority-dot" style={{ background: priorityColorMap[todo.priority] }} />
+          <span className="drawer-id">TODO-{todo.id.slice(0, 6)}</span>
+          <span className="drawer-status-dot" style={{ background: status === 'in_progress' ? 'var(--brand-primary)' : status === 'done' ? 'var(--semantic-success)' : 'var(--text-quaternary)' }} />
         </div>
-        <button onClick={onClose} className="sidebar-collapse-btn">
-          ✕
+        <button className="drawer-close-btn" onClick={onClose}>
+          <CloseOutlined style={{ fontSize: 13 }} />
         </button>
       </div>
 
-      {/* Title */}
-      <input
-        className="todo-drawer-title-input"
-        value={title}
-        onChange={e => setTitle(e.target.value)}
-        onBlur={() => handleBlur('title', title)}
-        onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
-      />
+      {/* Scrollable body */}
+      <div className="drawer-body">
+        {/* Title */}
+        <input
+          className="todo-drawer-title-input"
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          onBlur={() => handleBlur('title', title)}
+          onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+        />
 
-      {/* Status & Priority pills */}
-      <div className="todo-drawer-section">
+        {/* Status & Priority row */}
         <div style={{ display: 'flex', gap: 16 }}>
           <div style={{ flex: 1 }}>
             <SectionLabel>状态</SectionLabel>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 4 }}>
               {statusOptions.map(opt => {
                 const active = status === opt.value
                 return (
-                  <button
-                    key={opt.value}
-                    onClick={() => {
-                      setStatus(opt.value)
-                      onStatusChange(todo.id, opt.value)
-                    }}
+                  <button key={opt.value}
+                    onClick={() => { setStatus(opt.value); onStatusChange(todo.id, opt.value) }}
+                    className="drawer-pill"
+                    data-active={active ? 'true' : undefined}
                     style={{
-                      flex: 1, height: 32,
-                      border: `1.5px solid ${active ? opt.color : 'var(--border-primary)'}`,
-                      background: active ? opt.bg : 'var(--bg-card)',
-                      borderRadius: 8, cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                      fontSize: 12, fontWeight: active ? 600 : 500,
-                      color: active ? opt.color : 'var(--text-tertiary)',
-                      transition: 'all 0.15s ease',
+                      color: active ? opt.color : 'var(--text-quaternary)',
+                      background: active ? opt.bg : 'transparent',
                     }}
                   >
-                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: opt.dot, opacity: active ? 1 : 0.4 }} />
+                    <span className="drawer-pill-dot" style={{ background: active ? opt.dot : 'transparent' }} />
                     {opt.label}
                   </button>
                 )
@@ -204,28 +216,20 @@ const TodoDrawer: React.FC<Props> = ({
           </div>
           <div style={{ flex: 1 }}>
             <SectionLabel>优先级</SectionLabel>
-            <div style={{ display: 'flex', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 4 }}>
               {priorityOptions.map(opt => {
                 const active = priority === opt.value
                 return (
-                  <button
-                    key={opt.value}
-                    onClick={() => {
-                      setPriority(opt.value)
-                      handleBlur('priority', opt.value)
-                    }}
+                  <button key={opt.value}
+                    onClick={() => { setPriority(opt.value); handleBlur('priority', opt.value) }}
+                    className="drawer-pill"
+                    data-active={active ? 'true' : undefined}
                     style={{
-                      flex: 1, height: 32,
-                      border: `1.5px solid ${active ? opt.color : 'var(--border-primary)'}`,
-                      background: active ? opt.bg : 'var(--bg-card)',
-                      borderRadius: 8, cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                      fontSize: 12, fontWeight: active ? 600 : 500,
-                      color: active ? opt.color : 'var(--text-tertiary)',
-                      transition: 'all 0.15s ease',
+                      color: active ? opt.color : 'var(--text-quaternary)',
+                      background: active ? opt.bg : 'transparent',
                     }}
                   >
-                    <span style={{ width: 8, height: 8, borderRadius: 2, background: opt.color, opacity: active ? 1 : 0.3 }} />
+                    <span className="drawer-pill-dot" style={{ background: active ? opt.color : 'transparent' }} />
                     {opt.label}
                   </button>
                 )
@@ -233,225 +237,230 @@ const TodoDrawer: React.FC<Props> = ({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Meta row */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16, marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-quinary)' }}>
-          <ClockCircleOutlined style={{ fontSize: 11 }} />
-          {dayjs(todo.created_at).format('YYYY-MM-DD HH:mm')}
-        </div>
-        {todo.updated_at !== todo.created_at && (
-          <span style={{ fontSize: 11, color: 'var(--text-quinary)' }}>
-            更新 {dayjs(todo.updated_at).format('MM-DD HH:mm')}
-          </span>
-        )}
-        {todo.source && (
-          <span style={{
-            fontSize: 11, fontWeight: 600, color: 'var(--brand-primary)',
-            background: 'var(--brand-primary-light)', padding: '1px 8px', borderRadius: 6,
-          }}>
-            {todo.source}
-          </span>
-        )}
-      </div>
-
-      <div style={{ height: 1, background: 'var(--border-secondary)', margin: '0 0 16px' }} />
-
-      {/* Description */}
-      <div className="todo-drawer-section">
-        <SectionLabel optional>描述</SectionLabel>
-        <textarea
-          className="todo-drawer-inline-field"
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-          onBlur={() => handleBlur('description', description)}
-          placeholder="添加任务描述..."
-          rows={2}
-        />
-      </div>
-
-      {/* Notes */}
-      <div className="todo-drawer-section" style={{ marginTop: 16 }}>
-        <SectionLabel optional>备注</SectionLabel>
-        <textarea
-          className="todo-drawer-inline-field"
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
-          onBlur={() => handleBlur('notes', notes)}
-          placeholder="添加备注信息..."
-          rows={2}
-        />
-      </div>
-
-      {/* Subtasks */}
-      <div className="todo-drawer-section" style={{ marginTop: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <SectionLabel>
-            子任务
-            {subtasks.length > 0 && (
-              <span style={{ color: 'var(--text-quinary)', fontWeight: 400, marginLeft: 4 }}>
-                {subtasks.filter(s => s.done).length}/{subtasks.length}
-              </span>
-            )}
-          </SectionLabel>
-        </div>
-        {subtasks.map((st, idx) => (
-          <div key={idx} className="subtask-item" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '20px', marginBottom: 2 }}>
-            <input
-              type="checkbox" className="todo-checkbox"
-              checked={st.done}
-              onChange={() => onToggleSubtask(todo.id, idx)}
-              style={{ width: 16, height: 16, borderRadius: 4, borderWidth: 1.5 }}
-            />
-            <span style={{ flex: 1, color: st.done ? 'var(--text-quaternary)' : 'var(--text-secondary)', textDecoration: st.done ? 'line-through' : 'none', fontWeight: 500 }}>
-              {st.text}
+        {/* Meta chips */}
+        <div className="drawer-meta-row">
+          <MetaChip icon={<ClockCircleOutlined style={{ fontSize: 11 }} />}>
+            {dayjs(todo.created_at).format('YYYY-MM-DD HH:mm')}
+          </MetaChip>
+          {todo.updated_at !== todo.created_at && (
+            <MetaChip icon={null}>
+              更新 {dayjs(todo.updated_at).format('MM-DD HH:mm')}
+            </MetaChip>
+          )}
+          {todo.source && (
+            <span className="drawer-source-chip">{todo.source}</span>
+          )}
+          {todo.due_date && (
+            <span className="drawer-due-chip" style={{ color: isOverdue ? 'var(--semantic-danger)' : undefined }}>
+              <CalendarOutlined style={{ fontSize: 10 }} />
+              {formatRelativeDate(todo.due_date)}
+              {isOverdue && <ExclamationCircleOutlined style={{ fontSize: 10, marginLeft: 2 }} />}
             </span>
-            {!st.done && (
-              <Tooltip title="提升为独立任务">
-                <button
-                  className="subtask-promote-btn"
-                  onClick={() => onPromoteSubtask(todo.id, idx)}
-                >
-                  <ArrowUpOutlined style={{ fontSize: 11 }} />
-                </button>
-              </Tooltip>
-            )}
-          </div>
-        ))}
-        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-          <input
+          )}
+          {todo.group_id && (
+            <span className="drawer-group-chip">
+              <FolderOutlined style={{ fontSize: 10 }} />
+              {groups.find(g => g.id === todo.group_id)?.name}
+            </span>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div className="drawer-divider" />
+
+        {/* Description */}
+        <div style={{ marginBottom: 16 }}>
+          <SectionLabel optional>描述</SectionLabel>
+          <textarea
             className="todo-drawer-inline-field"
-            style={{ flex: 1, fontSize: 12, padding: '4px 8px', borderRadius: 6 }}
-            value={newSubtask}
-            onChange={e => setNewSubtask(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleAddSubtask() }}
-            placeholder="添加子任务..."
-          />
-          <button
-            onClick={handleAddSubtask}
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              width: 28, height: 28, border: '1px dashed var(--text-quinary)',
-              background: 'transparent', borderRadius: 6, cursor: 'pointer',
-              color: 'var(--text-quaternary)', flexShrink: 0,
-            }}
-          >
-            <PlusOutlined style={{ fontSize: 11 }} />
-          </button>
-        </div>
-      </div>
-
-      <div style={{ height: 1, background: 'var(--border-secondary)', margin: '16px 0' }} />
-
-      {/* Due date & Tags */}
-      <div style={{ display: 'flex', gap: 12 }}>
-        <div style={{ flex: 1 }}>
-          <SectionLabel optional>截止日期</SectionLabel>
-          <DatePicker
-            style={{ width: '100%' }}
-            value={dueDate}
-            onChange={date => {
-              setDueDate(date)
-              handleBlur('due_date', date)
-            }}
-            placeholder="选择日期"
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            onBlur={() => handleBlur('description', description)}
+            placeholder="添加任务描述..."
+            rows={3}
           />
         </div>
-        <div style={{ flex: 1 }}>
-          <SectionLabel optional>标签</SectionLabel>
-          <Select
-            mode="tags"
-            value={tags}
-            onChange={newTags => {
-              setTags(newTags)
-              // Save on change for tags
-              const tagsStr = JSON.stringify(newTags)
-              if (tagsStr !== (todo.tags || '[]')) {
-                onUpdate(todo.id, { tags: newTags }).catch(() => {
-                  try { setTags(JSON.parse(todo.tags || '[]')) } catch { setTags([]) }
-                })
-              }
-            }}
-            placeholder="输入后回车"
-            tokenSeparators={[',']}
-            style={{ width: '100%' }}
+
+        {/* Notes */}
+        <div style={{ marginBottom: 16 }}>
+          <SectionLabel optional>备注</SectionLabel>
+          <textarea
+            className="todo-drawer-inline-field"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            onBlur={() => handleBlur('notes', notes)}
+            placeholder="添加备注信息..."
+            rows={2}
           />
         </div>
-      </div>
 
-      {/* Group */}
-      {groups.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <SectionLabel optional>分组</SectionLabel>
-          <Select
-            value={groupId}
-            onChange={newGid => {
-              setGroupId(newGid)
-              handleBlur('group_id', newGid)
-            }}
-            placeholder="选择分组"
-            allowClear
-            style={{ width: '100%' }}
-          >
-            {groups.map(g => (
-              <Select.Option key={g.id} value={g.id}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span>{g.name}</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-quinary)' }}>{g.todo_count ?? 0}</span>
+        {/* Subtasks */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <SectionLabel>
+              子任务
+              {subtasks.length > 0 && (
+                <span style={{ color: 'var(--brand-primary)', fontWeight: 700, marginLeft: 6 }}>
+                  {subtaskDone}/{subtasks.length}
                 </span>
-              </Select.Option>
-            ))}
-          </Select>
-        </div>
-      )}
-
-      {/* Summary preview */}
-      {todo.summary && (
-        <div style={{ marginTop: 16 }}>
-          <SectionLabel>摘要</SectionLabel>
-          <div style={{
-            padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 8,
-            border: '1px solid var(--border-secondary)', fontSize: 12, color: 'var(--text-tertiary)',
-            lineHeight: '18px', maxHeight: 80, overflow: 'hidden', position: 'relative',
-          }}>
-            {todo.summary.slice(0, 200)}
-            {todo.summary.length > 200 && '...'}
-            <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(transparent, var(--bg-secondary))' }} />
+              )}
+            </SectionLabel>
           </div>
-          <button
-            onClick={() => onViewSummary(todo)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 4, marginTop: 6,
-              padding: '4px 10px', border: 'none', background: 'var(--semantic-purple-bg)',
-              borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 500,
-              color: 'var(--semantic-purple)', fontFamily: 'inherit',
-            }}
-          >
-            <FileTextOutlined style={{ fontSize: 11 }} />
-            查看摘要
-          </button>
-        </div>
-      )}
 
-      {/* Delete button */}
-      <div style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid var(--border-secondary)' }}>
+          {subtasks.length > 0 && (
+            <div style={{
+              background: 'var(--bg-secondary)', borderRadius: 10,
+              border: '1px solid var(--border-secondary)', overflow: 'hidden',
+              marginBottom: subtasks.length > 0 ? 6 : 0,
+            }}>
+              {subtasks.map((st, idx) => (
+                <div key={idx} className="subtask-item" style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  fontSize: 12, lineHeight: '20px',
+                  borderBottom: idx < subtasks.length - 1 ? '1px solid var(--border-secondary)' : 'none',
+                  padding: '5px 10px',
+                }}>
+                  <input
+                    type="checkbox" className="todo-checkbox"
+                    checked={st.done}
+                    onChange={() => onToggleSubtask(todo.id, idx)}
+                    style={{ width: 16, height: 16, borderRadius: 4, borderWidth: 1.5 }}
+                  />
+                  <span style={{
+                    flex: 1, color: st.done ? 'var(--text-quaternary)' : 'var(--text-secondary)',
+                    textDecoration: st.done ? 'line-through' : 'none', fontWeight: 500,
+                  }}>
+                    {st.text}
+                  </span>
+                  {!st.done && (
+                    <Tooltip title="提升为独立任务">
+                      <button className="subtask-promote-btn" onClick={() => onPromoteSubtask(todo.id, idx)}>
+                        <ArrowUpOutlined style={{ fontSize: 11 }} />
+                      </button>
+                    </Tooltip>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              className="todo-drawer-inline-field"
+              style={{ flex: 1, fontSize: 12, padding: '5px 10px', borderRadius: 8 }}
+              value={newSubtask}
+              onChange={e => setNewSubtask(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleAddSubtask() }}
+              placeholder="添加子任务..."
+            />
+            <button className="drawer-add-subtask-btn" onClick={handleAddSubtask}>
+              <PlusOutlined style={{ fontSize: 11 }} />
+            </button>
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div className="drawer-divider" />
+
+        {/* Tags & Due date */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <SectionLabel optional>
+              <TagOutlined style={{ fontSize: 10, marginRight: 4 }} />标签
+            </SectionLabel>
+            <Select
+              mode="tags"
+              value={tags}
+              onChange={newTags => {
+                setTags(newTags)
+                const tagsStr = JSON.stringify(newTags)
+                if (tagsStr !== (todo.tags || '[]')) {
+                  onUpdate(todo.id, { tags: newTags }).catch(() => {
+                    try { setTags(JSON.parse(todo.tags || '[]')) } catch { setTags([]) }
+                  })
+                }
+              }}
+              placeholder="输入后回车"
+              tokenSeparators={[',']}
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <SectionLabel optional>
+              <CalendarOutlined style={{ fontSize: 10, marginRight: 4 }} />截止日期
+            </SectionLabel>
+            <DatePicker
+              style={{ width: '100%' }}
+              value={dueDate}
+              onChange={date => { setDueDate(date); handleBlur('due_date', date) }}
+              placeholder="选择日期"
+            />
+          </div>
+        </div>
+
+        {/* Group */}
+        {groups.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <SectionLabel optional>分组</SectionLabel>
+            <Select
+              value={groupId}
+              onChange={newGid => { setGroupId(newGid); handleBlur('group_id', newGid) }}
+              placeholder="选择分组"
+              allowClear
+              style={{ width: '100%' }}
+            >
+              {groups.map(g => (
+                <Select.Option key={g.id} value={g.id}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{g.name}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-quinary)' }}>{g.todo_count ?? 0}</span>
+                  </span>
+                </Select.Option>
+              ))}
+            </Select>
+          </div>
+        )}
+
+        {/* Summary */}
+        <div style={{ marginBottom: 16 }}>
+          <SectionLabel optional>摘要</SectionLabel>
+          {todo.summary ? (
+            <>
+              <div className="drawer-summary-preview markdown-preview">
+                <Markdown remarkPlugins={[remarkGfm]}>
+                  {todo.summary.length > 300 ? todo.summary.slice(0, 300) + '...' : todo.summary}
+                </Markdown>
+                <div className="drawer-summary-fade" />
+              </div>
+              <button className="drawer-summary-btn" onClick={() => onViewSummary(todo)}>
+                <FileTextOutlined style={{ fontSize: 11 }} />
+                编辑摘要
+              </button>
+            </>
+          ) : (
+            <button className="drawer-summary-btn" onClick={() => onViewSummary(todo)}>
+              <PlusOutlined style={{ fontSize: 11 }} />
+              添加摘要
+            </button>
+          )}
+        </div>
+
+        {/* Spacer pushes actions to bottom */}
+        <div style={{ flex: 1, minHeight: 24 }} />
+      </div>
+
+      {/* Sticky footer */}
+      <div className="drawer-footer">
         <Popconfirm
-          title="确定删除此任务？"
+          title="确定删除此任务？此操作不可撤销"
           onConfirm={() => onDelete(todo)}
           okText="删除"
           cancelText="取消"
           okButtonProps={{ danger: true }}
         >
-          <button style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '8px 16px', border: '1px solid var(--semantic-danger)',
-            background: 'var(--semantic-danger-bg)', borderRadius: 8,
-            cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            color: 'var(--semantic-danger)', fontFamily: 'inherit',
-            transition: 'all 0.15s ease',
-          }}>
-            <DeleteOutlined style={{ fontSize: 13 }} />
+          <button className="drawer-delete-btn">
+            <DeleteOutlined style={{ fontSize: 12 }} />
             删除任务
           </button>
         </Popconfirm>

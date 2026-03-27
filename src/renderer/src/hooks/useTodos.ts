@@ -38,6 +38,7 @@ interface UseTodosReturn {
   smartCounts: SmartCounts
   activeSmartView: SmartView
   handleSmartViewChange: (view: SmartView) => void
+  allTags: string[]
 }
 
 export function useTodos(): UseTodosReturn {
@@ -53,6 +54,7 @@ export function useTodos(): UseTodosReturn {
   const [summaryTodos, setSummaryTodos] = useState<TodoSummaryItem[]>([])
   const [smartCounts, setSmartCounts] = useState<SmartCounts>({ today: 0, upcoming: 0, overdue: 0 })
   const [activeSmartView, setActiveSmartView] = useState<SmartView>('all')
+  const [allTags, setAllTags] = useState<string[]>([])
 
   useEffect(() => {
     initClient().then(() => setInitialized(true))
@@ -139,6 +141,18 @@ export function useTodos(): UseTodosReturn {
     fetchSmartCounts()
   }, [fetchSmartCounts])
 
+  // Extract tags from todos
+  useEffect(() => {
+    const tagSet = new Set<string>()
+    todos.forEach(t => {
+      try {
+        const tags = JSON.parse(t.tags || '[]') as string[]
+        tags.forEach(tag => tagSet.add(tag))
+      } catch { /* ignore */ }
+    })
+    setAllTags(Array.from(tagSet).sort())
+  }, [todos])
+
   const refreshAfterMutation = useCallback(() => {
     fetchTodos()
     fetchGroups()
@@ -184,17 +198,84 @@ export function useTodos(): UseTodosReturn {
     }
   }, [])
 
+  let tempIdCounter = 0
+  const nextTempId = () => `__temp_${++tempIdCounter}_${Date.now()}`
+
   const createTodo = useCallback(async (input: CreateTodoInput): Promise<Todo> => {
-    const todo = await api.createTodo(input)
-    debouncedRefresh()
-    return todo
+    const tempId = nextTempId()
+    const now = new Date().toISOString()
+    const tempTodo: Todo = {
+      id: tempId,
+      title: input.title,
+      description: input.description ?? '',
+      status: input.status ?? 'pending',
+      priority: input.priority ?? 'low',
+      tags: input.tags ? JSON.stringify(input.tags) : '[]',
+      due_date: input.due_date ?? null,
+      completed_at: null,
+      created_at: now,
+      updated_at: now,
+      source: input.source ?? '',
+      notes: input.notes ?? '',
+      subtasks: input.subtasks ? JSON.stringify(input.subtasks) : '[]',
+      deadline_label: input.deadline_label ?? '',
+      remind_count: 0,
+      archived: 0,
+      group_id: input.group_id ?? null,
+      summary: input.summary ?? '',
+    }
+
+    // Optimistic: prepend immediately
+    setTodos(prev => [tempTodo, ...prev])
+    setTotal(prev => prev + 1)
+
+    try {
+      const realTodo = await api.createTodo(input)
+      // Replace temp todo with real one (preserves position)
+      setTodos(prev => prev.map(t => t.id === tempId ? realTodo : t))
+      debouncedRefresh()
+      return realTodo
+    } catch (err) {
+      // Rollback
+      setTodos(prev => prev.filter(t => t.id !== tempId))
+      setTotal(prev => Math.max(0, prev - 1))
+      throw err
+    }
   }, [debouncedRefresh])
 
   const updateTodo = useCallback(async (id: string, input: UpdateTodoInput): Promise<Todo> => {
-    const todo = await api.updateTodo(id, input)
-    debouncedRefresh()
-    return todo
-  }, [debouncedRefresh])
+    // Optimistic: apply changes locally
+    setTodos(prev => prev.map(t => {
+      if (t.id !== id) return t
+      const updated = { ...t, updated_at: new Date().toISOString() }
+      if (input.title !== undefined) updated.title = input.title
+      if (input.description !== undefined) updated.description = input.description
+      if (input.status !== undefined) updated.status = input.status
+      if (input.priority !== undefined) updated.priority = input.priority
+      if (input.tags !== undefined) updated.tags = typeof input.tags === 'string' ? input.tags : JSON.stringify(input.tags)
+      if (input.due_date !== undefined) updated.due_date = input.due_date
+      if (input.notes !== undefined) updated.notes = input.notes
+      if (input.subtasks !== undefined) updated.subtasks = typeof input.subtasks === 'string' ? input.subtasks : JSON.stringify(input.subtasks)
+      if (input.group_id !== undefined) updated.group_id = input.group_id
+      if (input.summary !== undefined) updated.summary = input.summary
+      if (input.source !== undefined) updated.source = input.source
+      if (input.archived !== undefined) updated.archived = typeof input.archived === 'string' ? parseInt(input.archived) : input.archived
+      if (input.status === 'done') updated.completed_at = new Date().toISOString()
+      return updated
+    }))
+
+    try {
+      const realTodo = await api.updateTodo(id, input)
+      // Reconcile: replace with server version
+      setTodos(prev => prev.map(t => t.id === id ? realTodo : t))
+      debouncedRefresh()
+      return realTodo
+    } catch (err) {
+      // Rollback by re-fetching
+      fetchTodos()
+      throw err
+    }
+  }, [debouncedRefresh, fetchTodos])
 
   const updateTodoStatus = useCallback(async (id: string, status: Todo['status']): Promise<Todo> => {
     const todo = await api.updateTodoStatus(id, status)
@@ -226,16 +307,39 @@ export function useTodos(): UseTodosReturn {
   }, [debouncedRefresh, fetchTodos])
 
   const updateSubtasks = useCallback(async (id: string, subtasks: Subtask[]): Promise<Todo> => {
-    const todo = await api.updateSubtasks(id, subtasks)
-    debouncedRefresh()
-    return todo
-  }, [debouncedRefresh])
+    const subtasksStr = JSON.stringify(subtasks)
+    setTodos(prev => prev.map(t => t.id === id ? { ...t, subtasks: subtasksStr, updated_at: new Date().toISOString() } : t))
+    try {
+      const todo = await api.updateSubtasks(id, subtasks)
+      setTodos(prev => prev.map(t => t.id === id ? todo : t))
+      debouncedRefresh()
+      return todo
+    } catch {
+      fetchTodos()
+      throw new Error('子任务更新失败')
+    }
+  }, [debouncedRefresh, fetchTodos])
 
   const toggleSubtask = useCallback(async (id: string, index: number): Promise<Todo> => {
-    const todo = await api.toggleSubtask(id, index)
-    debouncedRefresh()
-    return todo
-  }, [debouncedRefresh])
+    // Optimistic: flip the subtask locally
+    setTodos(prev => prev.map(t => {
+      if (t.id !== id) return t
+      try {
+        const subs: Subtask[] = JSON.parse(t.subtasks || '[]')
+        if (subs[index]) subs[index] = { ...subs[index], done: !subs[index].done }
+        return { ...t, subtasks: JSON.stringify(subs), updated_at: new Date().toISOString() }
+      } catch { return t }
+    }))
+    try {
+      const todo = await api.toggleSubtask(id, index)
+      setTodos(prev => prev.map(t => t.id === id ? todo : t))
+      debouncedRefresh()
+      return todo
+    } catch {
+      fetchTodos()
+      throw new Error('子任务切换失败')
+    }
+  }, [debouncedRefresh, fetchTodos])
 
   const archiveTodos = useCallback(async (): Promise<number> => {
     const result = await api.archiveTodos()
@@ -244,15 +348,34 @@ export function useTodos(): UseTodosReturn {
   }, [debouncedRefresh])
 
   const deleteTodo = useCallback(async (id: string): Promise<void> => {
-    await api.deleteTodo(id)
-    debouncedRefresh()
-  }, [debouncedRefresh])
+    const prev = todos
+    setTodos(p => p.filter(t => t.id !== id))
+    setTotal(p => Math.max(0, p - 1))
+    try {
+      await api.deleteTodo(id)
+      debouncedRefresh()
+    } catch {
+      setTodos(prev)
+      setTotal(p => p + 1)
+      throw new Error('删除失败')
+    }
+  }, [todos, debouncedRefresh])
 
   const deleteTodos = useCallback(async (ids: string[]): Promise<number> => {
-    const result = await api.deleteTodos(ids)
-    debouncedRefresh()
-    return result.deleted
-  }, [debouncedRefresh])
+    const idSet = new Set(ids)
+    const prev = todos
+    setTodos(p => p.filter(t => !idSet.has(t.id)))
+    setTotal(p => Math.max(0, p - ids.length))
+    try {
+      const result = await api.deleteTodos(ids)
+      debouncedRefresh()
+      return result.deleted
+    } catch {
+      setTodos(prev)
+      setTotal(p => p + ids.length)
+      throw new Error('批量删除失败')
+    }
+  }, [todos, debouncedRefresh])
 
   const getSources = useCallback(async (): Promise<string[]> => {
     return api.getSources()
@@ -288,10 +411,64 @@ export function useTodos(): UseTodosReturn {
   }, [fetchGroups])
 
   const promoteSubtask = useCallback(async (todoId: string, index: number): Promise<Todo> => {
-    const todo = await api.promoteSubtask(todoId, index)
-    debouncedRefresh()
-    return todo
-  }, [debouncedRefresh])
+    // Optimistic: remove the subtask locally, create a temp new todo
+    let removedSubtask: Subtask | null = null
+    setTodos(prev => prev.map(t => {
+      if (t.id !== todoId) return t
+      try {
+        const subs: Subtask[] = JSON.parse(t.subtasks || '[]')
+        if (subs[index]) {
+          removedSubtask = subs[index]
+          const newSubs = [...subs]
+          newSubs.splice(index, 1)
+          return { ...t, subtasks: JSON.stringify(newSubs), updated_at: new Date().toISOString() }
+        }
+      } catch { /* ignore */ }
+      return t
+    }))
+
+    // If a subtask was promoted, optimistically add it as a new todo
+    const promotedTempId = nextTempId()
+    if (removedSubtask) {
+      const now = new Date().toISOString()
+      setTodos(prev => {
+        // Find the parent todo to get group_id
+        const parent = prev.find(t => t.id === todoId)
+        const promoted: Todo = {
+          id: promotedTempId,
+          title: removedSubtask!.text,
+          description: '',
+          status: 'pending',
+          priority: 'low',
+          tags: '[]',
+          due_date: null,
+          completed_at: null,
+          created_at: now,
+          updated_at: now,
+          source: '',
+          notes: '',
+          subtasks: '[]',
+          deadline_label: '',
+          remind_count: 0,
+          archived: 0,
+          group_id: parent?.group_id ?? null,
+          summary: '',
+        }
+        return [promoted, ...prev]
+      })
+      setTotal(p => p + 1)
+    }
+
+    try {
+      const todo = await api.promoteSubtask(todoId, index)
+      setTodos(prev => prev.map(t => t.id === todoId ? todo : t))
+      debouncedRefresh()
+      return todo
+    } catch {
+      fetchTodos()
+      throw new Error('子任务提升失败')
+    }
+  }, [debouncedRefresh, fetchTodos])
 
   return {
     todos, total, loading, stats, query, setQuery, refresh: fetchTodos,
@@ -301,5 +478,6 @@ export function useTodos(): UseTodosReturn {
     createGroup, updateGroup, deleteGroup, promoteSubtask, fetchGroups,
     reorderGroups, summaryTodos, fetchSummaryTodos,
     smartCounts, activeSmartView, handleSmartViewChange,
+    allTags,
   }
 }

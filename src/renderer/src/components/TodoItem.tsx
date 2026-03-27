@@ -7,17 +7,21 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import { formatRelativeDate } from '../utils/relativeDate'
 import type { Todo, Subtask } from '../types/todo'
 
 interface Props {
   todo: Todo
   focused?: boolean
+  selected?: boolean
   onEdit: (todo: Todo) => void
   onDelete: (todo: Todo) => void
   onStatusChange: (id: string, status: Todo['status']) => void
   onToggleSubtask: (id: string, index: number) => void
   onPromoteSubtask: (todoId: string, index: number) => void
   onViewSummary: (todo: Todo) => void
+  onSelectionToggle?: () => void
+  onShiftClick?: () => void
 }
 
 const priorityColors: Record<Todo['priority'], string> = {
@@ -38,7 +42,7 @@ const statusLabels: Record<Todo['status'], string> = {
   done: '已完成',
 }
 
-const TodoItem: React.FC<Props> = ({ todo, focused, onEdit, onDelete, onStatusChange, onToggleSubtask, onPromoteSubtask, onViewSummary }) => {
+const TodoItem: React.FC<Props> = ({ todo, focused, selected, onEdit, onDelete, onStatusChange, onToggleSubtask, onPromoteSubtask, onViewSummary, onSelectionToggle, onShiftClick }) => {
   let tags: string[] = []
   try { tags = JSON.parse(todo.tags || '[]') } catch { tags = [] }
   let subtasks: Subtask[] = []
@@ -65,19 +69,42 @@ const TodoItem: React.FC<Props> = ({ todo, focused, onEdit, onDelete, onStatusCh
 
   return (
     <div
-      className={`todo-card${completing ? ' completing' : ''}${focused ? ' todo-card-focused' : ''}`}
-      onClick={() => onEdit(todo)}
+      className={`todo-card${completing ? ' completing' : ''}${focused ? ' todo-card-focused' : ''}${selected ? ' todo-card-selected' : ''}`}
+      onClick={(e) => {
+        if (e.shiftKey && onShiftClick) {
+          e.preventDefault()
+          onShiftClick()
+          return
+        }
+        onEdit(todo)
+      }}
       style={{
         padding: '16px 20px',
         display: 'flex',
         alignItems: 'flex-start',
         gap: 14,
         opacity: isArchived ? 0.5 : isDone ? 0.65 : 1,
-        background: isArchived ? 'var(--bg-input)' : 'var(--bg-card)',
+        background: selected ? 'var(--brand-primary-light)' : isArchived ? 'var(--bg-input)' : 'var(--bg-card)',
         position: 'relative',
         cursor: 'pointer',
+        transition: 'background 0.15s ease',
       }}
     >
+      {/* Selection checkbox */}
+      <div
+        className="selection-checkbox-wrapper"
+        onClick={e => e.stopPropagation()}
+        style={{ display: 'flex', alignItems: 'center', paddingTop: 2 }}
+      >
+        <input
+          type="checkbox"
+          className="todo-checkbox selection-checkbox"
+          checked={selected}
+          onChange={() => onSelectionToggle?.()}
+          style={{ width: 16, height: 16, borderRadius: 4, borderWidth: 1.5 }}
+        />
+      </div>
+
       {/* Priority bar */}
       <div
         className={`priority-bar ${todo.priority}`}
@@ -224,20 +251,24 @@ const TodoItem: React.FC<Props> = ({ todo, focused, onEdit, onDelete, onStatusCh
             </span>
           ))}
 
-          {todo.deadline_label && todo.deadline_label !== '无截止日期' && (
-            <span onClick={e => e.stopPropagation()} style={{
-              fontSize: 11,
-              fontWeight: 500,
-              color: isOverdue ? 'var(--semantic-danger)' : 'var(--text-tertiary)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-              lineHeight: '18px',
-            }}>
-              {isOverdue && <ExclamationCircleOutlined style={{ fontSize: 11 }} />}
-              {todo.deadline_label}
-            </span>
-          )}
+          {todo.due_date && (() => {
+            const deadlineText = formatRelativeDate(todo.due_date)
+            if (!deadlineText) return null
+            return (
+              <span onClick={e => e.stopPropagation()} style={{
+                fontSize: 11,
+                fontWeight: 500,
+                color: isOverdue ? 'var(--semantic-danger)' : 'var(--text-tertiary)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                lineHeight: '18px',
+              }}>
+                {isOverdue && <ExclamationCircleOutlined style={{ fontSize: 11 }} />}
+                {deadlineText}
+              </span>
+            )
+          })()}
 
           {/* Status indicator */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 'auto' }}>

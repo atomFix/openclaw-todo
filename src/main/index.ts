@@ -18,10 +18,10 @@ function getAvailablePort(): Promise<number> {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1024,
-    height: 768,
-    minWidth: 800,
-    minHeight: 600,
+    width: 1280,
+    height: 800,
+    minWidth: 1100,
+    minHeight: 680,
     title: 'OpenClaw Todo',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 18 },

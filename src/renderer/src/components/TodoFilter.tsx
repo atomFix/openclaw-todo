@@ -64,6 +64,13 @@ const TodoFilter: React.FC<Props> = ({ query, onQueryChange, onRefresh, sources 
       onRemove: () => onQueryChange({ ...query, source: undefined, page: 1 }),
     })
   }
+  if (query.tag) {
+    activeFilters.push({
+      key: 'tag',
+      label: `标签: ${query.tag}`,
+      onRemove: () => onQueryChange({ ...query, tag: undefined, page: 1 }),
+    })
+  }
   if (query.search) {
     activeFilters.push({
       key: 'search',

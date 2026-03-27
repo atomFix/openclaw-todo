@@ -1,8 +1,12 @@
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
-import { Button, message, Tooltip } from 'antd'
-import { PlusOutlined, InboxOutlined, UndoOutlined, UnorderedListOutlined, AppstoreOutlined } from '@ant-design/icons'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { Button, Dropdown, message, Tooltip } from 'antd'
+import {
+  PlusOutlined, InboxOutlined, UndoOutlined, UnorderedListOutlined, AppstoreOutlined,
+  DownloadOutlined, QuestionCircleOutlined, CalendarOutlined,
+} from '@ant-design/icons'
 import { ConfigProvider, theme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import dayjs from 'dayjs'
 import Sidebar from './components/Sidebar'
 import QuickAdd from './components/QuickAdd'
 import TodoFilter from './components/TodoFilter'
@@ -10,7 +14,9 @@ import TodoList from './components/TodoList'
 import TodoForm from './components/TodoForm'
 import TodoDrawer from './components/TodoDrawer'
 import BoardView from './components/BoardView'
+import CalendarView from './components/CalendarView'
 import CommandPalette from './components/CommandPalette'
+import ShortcutsHelp from './components/ShortcutsHelp'
 import SummaryModal from './components/SummaryModal'
 import StatusBar from './components/StatusBar'
 import WeeklyChart from './components/WeeklyChart'
@@ -24,12 +30,12 @@ const App: React.FC = () => {
   const {
     todos, total, loading, query, setQuery, refresh,
     createTodo, updateTodo, updateTodoStatus, optimisticUpdateTodoStatus, deleteTodo,
-    toggleSubtask, archiveTodos, getSources,
+    toggleSubtask, archiveTodos, getSources, deleteTodos,
     groups, selectedGroupId, setSelectedGroupId, allCount,
     createGroup, updateGroup, deleteGroup, promoteSubtask, fetchGroups, reorderGroups,
     summaryTodos,
     smartCounts, activeSmartView, handleSmartViewChange,
-    getWeeklyStats,
+    getWeeklyStats, allTags,
   } = useTodos()
 
   // Dark mode
@@ -41,6 +47,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light'
+    document.documentElement.dataset.colorMode = isDark ? 'dark' : 'light'
     localStorage.setItem('theme', isDark ? 'dark' : 'light')
   }, [isDark])
 
@@ -85,9 +92,15 @@ const App: React.FC = () => {
   // Command palette
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
 
-  // View mode: list or board
-  const [viewMode, setViewMode] = useState<'list' | 'board'>(() => {
-    return (localStorage.getItem('viewMode') as 'list' | 'board') || 'list'
+  // Shortcuts help
+  const [shortcutsHelpOpen, setShortcutsHelpOpen] = useState(false)
+
+  // Multi-select
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+
+  // View mode: list, board, or calendar
+  const [viewMode, setViewMode] = useState<'list' | 'board' | 'calendar'>(() => {
+    return (localStorage.getItem('viewMode') as 'list' | 'board' | 'calendar') || 'list'
   })
   useEffect(() => {
     localStorage.setItem('viewMode', viewMode)
@@ -96,8 +109,18 @@ const App: React.FC = () => {
   // Status filter from StatusBar
   const [activeStatusFilter, setActiveStatusFilter] = useState<TodoStatus | null>(null)
 
+  // Active tag filter
+  const [activeTag, setActiveTag] = useState<string | null>(null)
+
+  // Calendar todos (all, for calendar view)
+  const [calendarTodos, setCalendarTodos] = useState<Todo[]>([])
+
   // Refs for keyboard shortcuts
   const quickAddRef = useRef<{ focus: () => void }>(null)
+  const inlineCreateRef = useRef<{ expand: () => void } | null>(null)
+
+  // Notification tracking
+  const notifiedOverdueRef = useRef(false)
 
   // Cleanup undo timer on unmount
   useEffect(() => {
@@ -116,6 +139,27 @@ const App: React.FC = () => {
     getWeeklyStats().then(setWeeklyStats).catch(() => {})
   }, [getSources, getWeeklyStats])
 
+  // Fetch all todos for calendar view
+  useEffect(() => {
+    if (viewMode === 'calendar') {
+      api.listTodos({ ...query, page: 1, page_size: 999 })
+        .then(res => setCalendarTodos(res.data))
+        .catch(() => {})
+    }
+  }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Tag counts for sidebar
+  const tagCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    todos.forEach(t => {
+      try {
+        const tags = JSON.parse(t.tags || '[]') as string[]
+        tags.forEach(tag => { counts[tag] = (counts[tag] || 0) + 1 })
+      } catch { /* ignore */ }
+    })
+    return counts
+  }, [todos])
+
   const handleQuickCreate = useCallback(async (input: CreateTodoInput) => {
     await createTodo(input)
     message.success('任务已创建')
@@ -127,6 +171,14 @@ const App: React.FC = () => {
     setPrefilledPriority(parsed?.priority)
     setPrefilledTags(parsed?.tags)
     setPrefilledDueDate(parsed?.due_date)
+    setFormOpen(true)
+  }, [])
+
+  const handleInlineOpenFullForm = useCallback((title: string, priority?: Todo['priority']) => {
+    setPrefilledTitle(title)
+    setPrefilledPriority(priority)
+    setPrefilledTags(undefined)
+    setPrefilledDueDate(undefined)
     setFormOpen(true)
   }, [])
 
@@ -255,10 +307,144 @@ const App: React.FC = () => {
     }
   }, [query, setQuery])
 
-  // Keyboard navigation
+  // Tag filter
+  const handleFilterTag = useCallback((tag: string | null) => {
+    setActiveTag(tag)
+    if (tag) {
+      setQuery({ ...query, tag, page: 1 })
+    } else {
+      const { tag: _, ...rest } = query
+      setQuery({ ...rest, page: 1 })
+    }
+  }, [query, setQuery])
+
+  // ─── Batch Operations ───
+  const handleBatchStatusChange = useCallback((status: Todo['status']) => {
+    selectedIds.forEach(id => optimisticUpdateTodoStatus(id, status))
+    setSelectedIds(new Set())
+  }, [selectedIds, optimisticUpdateTodoStatus])
+
+  const handleBatchDelete = useCallback(async () => {
+    try {
+      const count = selectedIds.size
+      await deleteTodos(Array.from(selectedIds))
+      setSelectedIds(new Set())
+      refreshSidebarData()
+      message.success(`已删除 ${count} 个任务`)
+    } catch {
+      message.error('批量删除失败')
+    }
+  }, [selectedIds, deleteTodos, refreshSidebarData])
+
+  const handleBatchArchive = useCallback(async () => {
+    try {
+      const count = selectedIds.size
+      await Promise.all(Array.from(selectedIds).map(id => updateTodo(id, { archived: 1 })))
+      setSelectedIds(new Set())
+      refreshSidebarData()
+      message.success(`已归档 ${count} 个任务`)
+    } catch {
+      message.error('批量归档失败')
+    }
+  }, [selectedIds, updateTodo, refreshSidebarData])
+
+  const handleBatchAddTags = useCallback(async (tags: string[]) => {
+    try {
+      const count = selectedIds.size
+      await Promise.all(Array.from(selectedIds).map(id => {
+        const todo = todos.find(t => t.id === id)
+        let existingTags: string[] = []
+        try { existingTags = JSON.parse(todo?.tags || '[]') } catch { existingTags = [] }
+        const merged = [...new Set([...existingTags, ...tags])]
+        return updateTodo(id, { tags: merged })
+      }))
+      setSelectedIds(new Set())
+      message.success(`已为 ${count} 个任务添加标签`)
+    } catch {
+      message.error('批量添加标签失败')
+    }
+  }, [selectedIds, todos, updateTodo])
+
+  // ─── Export ───
+  const handleExportJSON = useCallback(() => {
+    const data = todos.map(t => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      priority: t.priority,
+      due_date: t.due_date,
+      tags: t.tags,
+      group_id: t.group_id,
+      created_at: t.created_at,
+    }))
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `openclaw-todo-${dayjs().format('YYYY-MM-DD')}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    message.success('已导出 JSON')
+  }, [todos])
+
+  const handleExportCSV = useCallback(() => {
+    const statusMap: Record<string, string> = { pending: '待处理', in_progress: '进行中', done: '已完成' }
+    const priorityMap: Record<string, string> = { high: '高', medium: '中', low: '低' }
+    const headers = ['ID', '标题', '状态', '优先级', '截止日期', '标签', '分组', '创建时间']
+    const rows = todos.map(t => [
+      t.id,
+      `"${t.title.replace(/"/g, '""')}"`,
+      statusMap[t.status] || t.status,
+      priorityMap[t.priority] || t.priority,
+      t.due_date || '',
+      `"${(t.tags || '').replace(/"/g, '""')}"`,
+      t.group_id || '',
+      t.created_at,
+    ])
+    const csv = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `openclaw-todo-${dayjs().format('YYYY-MM-DD')}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    message.success('已导出 CSV')
+  }, [todos])
+
+  // ─── Desktop Notification ───
+  useEffect(() => {
+    const overdueTodos = todos.filter(t =>
+      t.due_date && dayjs(t.due_date).isBefore(dayjs(), 'day') && t.status !== 'done'
+    )
+    if (overdueTodos.length > 0 && !notifiedOverdueRef.current) {
+      notifiedOverdueRef.current = true
+      if ('Notification' in window) {
+        if (Notification.permission === 'granted') {
+          const n = new Notification('OpenClaw Todo', { body: `你有 ${overdueTodos.length} 个过期任务` })
+          n.onclick = () => window.focus()
+        } else if (Notification.permission !== 'denied') {
+          Notification.requestPermission().then(perm => {
+            if (perm === 'granted') {
+              const n = new Notification('OpenClaw Todo', { body: `你有 ${overdueTodos.length} 个过期任务` })
+              n.onclick = () => window.focus()
+            }
+          })
+        }
+      }
+    } else if (overdueTodos.length === 0) {
+      notifiedOverdueRef.current = false
+    }
+  }, [todos])
+
+  // ─── Keyboard Navigation ───
   const keyboardNav = useKeyboardNav({
     items: todos,
-    enabled: !formOpen && !editingTodo && !summaryTodo && !commandPaletteOpen,
+    enabled: !formOpen && !editingTodo && !summaryTodo && !commandPaletteOpen && !shortcutsHelpOpen && selectedIds.size === 0,
     onSelect: (todo) => handleEdit(todo),
     onToggleComplete: (todo) => {
       const nextStatus = todo.status === 'done' ? 'pending' : todo.status === 'in_progress' ? 'done' : 'in_progress'
@@ -284,15 +470,41 @@ const App: React.FC = () => {
         quickAddRef.current?.focus()
       }
 
+      // C - expand inline create (only when nothing else is active)
+      if (e.key === 'c' && !isInput && !e.metaKey && !e.ctrlKey
+          && !formOpen && !editingTodo && !summaryTodo && !commandPaletteOpen
+          && !shortcutsHelpOpen && selectedIds.size === 0
+          && keyboardNav.focusedIndex === -1
+          && !window.getSelection()?.toString()) {
+        e.preventDefault()
+        inlineCreateRef.current?.expand()
+      }
+
       // Cmd/Ctrl+K - toggle command palette
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
         setCommandPaletteOpen(prev => !prev)
       }
 
-      // Escape - close modals / clear search (topmost first)
+      // ? - toggle shortcuts help
+      if (e.key === '?' && !isInput && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault()
+        setShortcutsHelpOpen(prev => !prev)
+      }
+
+      // Tab - cycle view mode
+      if (e.key === 'Tab' && !isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault()
+        setViewMode(prev => prev === 'list' ? 'board' : prev === 'board' ? 'calendar' : 'list')
+      }
+
+      // Escape - close modals / clear search / clear selection (topmost first)
       if (e.key === 'Escape') {
-        if (commandPaletteOpen) {
+        if (shortcutsHelpOpen) {
+          setShortcutsHelpOpen(false)
+        } else if (selectedIds.size > 0) {
+          setSelectedIds(new Set())
+        } else if (commandPaletteOpen) {
           setCommandPaletteOpen(false)
         } else if (summaryTodo) {
           setSummaryTodo(null)
@@ -310,14 +522,16 @@ const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [formOpen, editingTodo, summaryTodo, commandPaletteOpen])
+  }, [formOpen, editingTodo, summaryTodo, commandPaletteOpen, shortcutsHelpOpen, selectedIds])
 
-  // Board view needs all todos
-  const boardQuery = useMemo(() => ({
-    ...query,
-    page: 1,
-    page_size: 999,
-  }), [query])
+  const pageTitle = activeSmartView === 'today' ? '今天'
+    : activeSmartView === 'upcoming' ? '即将到期'
+    : activeSmartView === 'overdue' ? '已过期'
+    : activeTag
+      ? `标签: ${activeTag}`
+      : selectedGroupId
+        ? (groups.find(g => g.id === selectedGroupId)?.name ?? '任务')
+        : '全部任务'
 
   return (
     <ConfigProvider
@@ -344,6 +558,10 @@ const App: React.FC = () => {
           smartCounts={smartCounts}
           activeSmartView={activeSmartView}
           onSmartViewChange={handleSmartViewChange}
+          allTags={allTags}
+          onFilterTag={handleFilterTag}
+          activeTag={activeTag}
+          tagCounts={tagCounts}
         />
 
         {/* Main content */}
@@ -359,29 +577,68 @@ const App: React.FC = () => {
             height: 98,
             flexShrink: 0,
             transition: 'background 0.25s ease, border-color 0.25s ease',
+            WebkitAppRegion: 'drag',
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, WebkitAppRegion: 'no-drag' }}>
               <span style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-tertiary)' }}>
-                {activeSmartView === 'today' ? '今天'
-                  : activeSmartView === 'upcoming' ? '即将到期'
-                  : activeSmartView === 'overdue' ? '已过期'
-                  : selectedGroupId
-                    ? (groups.find(g => g.id === selectedGroupId)?.name ?? '任务')
-                    : '全部任务'}
+                {pageTitle}
               </span>
-              <span style={{ fontSize: 12, color: 'var(--text-quaternary)' }}>
+              <span key={total} className="count-badge-pulse" style={{ fontSize: 12, color: 'var(--text-quaternary)' }}>
                 {total} 个任务
               </span>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {/* View mode toggle */}
-              <Tooltip title={viewMode === 'list' ? '看板视图' : '列表视图'}>
+            <div style={{ display: 'flex', gap: 8, WebkitAppRegion: 'no-drag' }}>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <Tooltip title="列表视图">
+                  <Button
+                    icon={<UnorderedListOutlined />}
+                    type={viewMode === 'list' ? 'primary' : 'default'}
+                    ghost={viewMode === 'list'}
+                    onClick={() => setViewMode('list')}
+                    style={{ borderRadius: 10, height: 36 }}
+                  />
+                </Tooltip>
+                <Tooltip title="看板视图">
+                  <Button
+                    icon={<AppstoreOutlined />}
+                    type={viewMode === 'board' ? 'primary' : 'default'}
+                    ghost={viewMode === 'board'}
+                    onClick={() => setViewMode('board')}
+                    style={{ borderRadius: 10, height: 36 }}
+                  />
+                </Tooltip>
+                <Tooltip title="日历视图">
+                  <Button
+                    icon={<CalendarOutlined />}
+                    type={viewMode === 'calendar' ? 'primary' : 'default'}
+                    ghost={viewMode === 'calendar'}
+                    onClick={() => setViewMode('calendar')}
+                    style={{ borderRadius: 10, height: 36 }}
+                  />
+                </Tooltip>
+              </div>
+
+              {/* Export */}
+              <Dropdown menu={{
+                items: [
+                  { key: 'json', label: '导出 JSON', onClick: handleExportJSON },
+                  { key: 'csv', label: '导出 CSV', onClick: handleExportCSV },
+                ],
+              }}>
+                <Tooltip title="导出">
+                  <Button icon={<DownloadOutlined />} style={{ borderRadius: 10, height: 36 }} />
+                </Tooltip>
+              </Dropdown>
+
+              {/* Shortcuts help */}
+              <Tooltip title="快捷键 (?)">
                 <Button
-                  icon={viewMode === 'list' ? <AppstoreOutlined /> : <UnorderedListOutlined />}
-                  onClick={() => setViewMode(v => v === 'list' ? 'board' : 'list')}
+                  icon={<QuestionCircleOutlined />}
+                  onClick={() => setShortcutsHelpOpen(true)}
                   style={{ borderRadius: 10, height: 36 }}
                 />
               </Tooltip>
+
               <Tooltip title="归档所有已完成任务">
                 <Button
                   icon={<InboxOutlined />}
@@ -419,14 +676,24 @@ const App: React.FC = () => {
 
           {/* Content */}
           <div style={{ flex: 1, padding: '24px 32px' }}>
-            <QuickAdd
-              ref={quickAddRef}
-              onCreate={handleQuickCreate}
-              onOpenFullForm={handleOpenFullForm}
-            />
-            <TodoFilter query={query} onQueryChange={setQuery} onRefresh={refresh} sources={sources} />
+            {viewMode !== 'calendar' && (
+              <>
+                <QuickAdd
+                  ref={quickAddRef}
+                  onCreate={handleQuickCreate}
+                  onOpenFullForm={handleOpenFullForm}
+                />
+                <TodoFilter query={query} onQueryChange={setQuery} onRefresh={refresh} sources={sources} />
+              </>
+            )}
 
-            {viewMode === 'board' ? (
+            {viewMode === 'calendar' ? (
+              <CalendarView
+                todos={calendarTodos}
+                onEdit={handleEdit}
+                onStatusChange={handleStatusChange}
+              />
+            ) : viewMode === 'board' ? (
               <BoardView
                 todos={todos}
                 onEdit={handleEdit}
@@ -456,6 +723,16 @@ const App: React.FC = () => {
                 isFiltered={!!(query.status || query.priority || query.tag || query.source)}
                 activeSmartView={activeSmartView}
                 groupName={selectedGroupId ? groups.find(g => g.id === selectedGroupId)?.name : null}
+                selectedIds={selectedIds}
+                onSelectionChange={setSelectedIds}
+                onBatchStatusChange={handleBatchStatusChange}
+                onBatchDelete={handleBatchDelete}
+                onBatchArchive={handleBatchArchive}
+                onBatchAddTags={handleBatchAddTags}
+                onCreateTodo={handleQuickCreate}
+                onOpenFullForm={handleInlineOpenFullForm}
+                defaultGroupId={selectedGroupId}
+                inlineCreateRef={inlineCreateRef}
               />
             )}
 
@@ -573,6 +850,12 @@ const App: React.FC = () => {
           onToggleTheme={toggleTheme}
           onArchive={handleArchive}
           onEditTodo={handleEdit}
+        />
+
+        {/* Shortcuts Help */}
+        <ShortcutsHelp
+          open={shortcutsHelpOpen}
+          onClose={() => setShortcutsHelpOpen(false)}
         />
       </div>
     </ConfigProvider>

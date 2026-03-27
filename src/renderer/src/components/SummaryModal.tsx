@@ -1,8 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { Modal, Tabs } from 'antd'
-import { EditOutlined, EyeOutlined } from '@ant-design/icons'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import React, { useState, useEffect } from 'react'
+import { Modal } from 'antd'
+import MDEditor from '@uiw/react-md-editor'
 import type { Todo } from '../types/todo'
 import dayjs from 'dayjs'
 
@@ -15,12 +13,10 @@ interface Props {
 
 const SummaryModal: React.FC<Props> = ({ open, todo, onSave, onClose }) => {
   const [content, setContent] = useState('')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     if (open && todo) {
       setContent(todo.summary || '')
-      setTimeout(() => textareaRef.current?.focus(), 100)
     }
   }, [open, todo])
 
@@ -30,77 +26,6 @@ const SummaryModal: React.FC<Props> = ({ open, todo, onSave, onClose }) => {
     onSave(todo.id, content)
     onClose()
   }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault()
-      handleSave()
-    }
-  }
-
-  const tabItems = [
-    {
-      key: 'edit',
-      label: (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <EditOutlined style={{ fontSize: 12 }} />
-          编辑
-        </span>
-      ),
-      children: (
-        <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={e => setContent(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="在此输入 Markdown 摘要内容..."
-          style={{
-            width: '100%',
-            minHeight: 360,
-            padding: 16,
-            border: '1px solid var(--border-primary)',
-            borderRadius: 8,
-            fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
-            fontSize: 13,
-            lineHeight: '22px',
-            background: 'var(--bg-input)',
-            color: 'var(--text-primary)',
-            resize: 'vertical',
-            outline: 'none',
-          }}
-        />
-      ),
-    },
-    {
-      key: 'preview',
-      label: (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <EyeOutlined style={{ fontSize: 12 }} />
-          预览
-        </span>
-      ),
-      children: (
-        <div
-          className="markdown-preview"
-          style={{
-            minHeight: 360,
-            padding: 16,
-            border: '1px solid var(--border-primary)',
-            borderRadius: 8,
-            background: 'var(--bg-card)',
-            overflowY: 'auto',
-            maxHeight: 500,
-          }}
-        >
-          {content ? (
-            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
-          ) : (
-            <p style={{ color: 'var(--text-quinary)', fontSize: 13, fontStyle: 'italic' }}>暂无摘要内容</p>
-          )}
-        </div>
-      ),
-    },
-  ]
 
   return (
     <Modal
@@ -132,7 +57,7 @@ const SummaryModal: React.FC<Props> = ({ open, todo, onSave, onClose }) => {
           </div>
         </div>
       )}
-      width={720}
+      width={900}
       destroyOnHidden
       styles={{ body: { padding: '24px 28px 12px' } }}
     >
@@ -146,7 +71,26 @@ const SummaryModal: React.FC<Props> = ({ open, todo, onSave, onClose }) => {
         </div>
       </div>
 
-      <Tabs defaultActiveKey="edit" items={tabItems} size="small" />
+      <div data-color-mode={document.documentElement.dataset.colorMode || 'light'}>
+        <MDEditor
+          value={content}
+          onChange={(val) => setContent(val || '')}
+          preview="live"
+          height={420}
+          minHeight={280}
+          maxHeight={600}
+          visibleDragbar
+          textareaProps={{
+            placeholder: '在此输入 Markdown 摘要内容...',
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault()
+                handleSave()
+              }
+            },
+          }}
+        />
+      </div>
     </Modal>
   )
 }
